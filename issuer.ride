@@ -1,0 +1,51 @@
+{-# STDLIB_VERSION 5 #-}
+{-# CONTENT_TYPE DAPP #-}
+{-# SCRIPT_TYPE ACCOUNT #-}
+
+
+let CALLERS = [
+  base58'3P7Ro7FSbXSSBTtWR4AHxXjFjMkGireVdsv'
+  # base58'3PPKvu6x52MFaMGfw3i2byPVXXBuH7FTNMU'
+]
+let plutoId = base58'Ajso6nTTjptu2UHLx6hfSXVtHFtRBJCkKYd5SAyj7zf5'
+
+
+func tryGetInteger(key: String) = {
+  match getInteger(this, key) {
+      case b:Int => b
+      case _ => 0
+  }
+}
+
+func tryGetBinary(key: String) = {
+  match getBinary(this, key) {
+      case b:ByteVector => b
+      case _ => base58''
+  }
+}
+
+func tryGetString(key: String) = {
+  match getString(this, key) {
+      case b:String => b
+      case _ => ""
+  }
+}
+
+
+@Callable(i)
+func requestIssue(amount: Int) = {
+  if (CALLERS.indexOf(i.caller.bytes) == unit) then {throw("no access to call this method")}
+  else if (amount > 1500 * 100000000) then {throw("too big amount to issue")}
+  else {
+    let plutoReissue = Reissue(plutoId, amount, true)
+    [
+      plutoReissue,
+      ScriptTransfer(i.caller, amount, plutoId)
+    ]
+  }
+}
+
+
+@Verifier(tx)
+func verify() = sigVerify(tx.bodyBytes, tx.proofs[0], tx.senderPublicKey)
+        
