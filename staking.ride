@@ -1,0 +1,155 @@
+{-# STDLIB_VERSION 5 #-}
+{-# CONTENT_TYPE DAPP #-}
+{-# SCRIPT_TYPE ACCOUNT #-}
+
+
+let plutoId = base58'Ajso6nTTjptu2UHLx6hfSXVtHFtRBJCkKYd5SAyj7zf5'
+let parametersAddress = Address(base58'3P3a1jssxc2CGdyC7SGbTJc9ZvTjZ5jBMLZ')
+
+let Scale8 = 100000000
+let dayDepth = 24*60
+
+
+func tryGetInteger(key: String) = {
+  match getInteger(this, key) {
+    case x: Int => x
+    case _ => 0
+  }}
+
+func tryGetString(key: String) = {
+  match getString(this, key) {
+    case x: String => x
+    case _ => ""
+  }}
+
+
+func tryGetIntParameter(key: String) = {
+  # from parameters SC
+  match getInteger(parametersAddress, key) {
+    case x: Int => x
+    case _ => 0
+  }}
+
+
+func calculateSRate() = {
+  # SRate = interest earned on 1 PLUTO 
+  strict stakingEmission = match invoke(parametersAddress, "getStakingBlockEmission", [false], []) {
+    case in: Int => in
+    case _ => throw("bad invoke")
+  }
+
+  let lastCheckSRate = tryGetInteger("global_lastCheckSRate")
+  let sPlutoAmount = tryGetInteger("global_sPluto")
+  let lastCheckHeight = tryGetInteger("global_lastCheckSRateHeight")
+  let blocks = height - lastCheckHeight
+  if (sPlutoAmount == 0) then {Scale8} else {
+    tryGetInteger("global_lastCheckSRate") + fraction(blocks * Scale8, stakingEmission, sPlutoAmount)
+  }
+}
+
+func recalcResult(sPlutoChange: Int) = {
+  let sPlutoAmount = tryGetInteger("global_sPluto") + sPlutoChange
+  let sRate = calculateSRate()
+  [
+    IntegerEntry("global_sPluto", sPlutoAmount),
+    IntegerEntry("global_pluto", fraction(sPlutoAmount, sRate, Scale8)),
+
+    IntegerEntry("global_lastCheckSRate", sRate),
+    IntegerEntry("global_lastCheckSRateHeight", height)
+  ]
+}
+
+func calculateStakedAmount(user: String) = {
+  let amount = tryGetInteger(user+"_sPluto")
+  fraction(amount, calculateSRate(), Scale8)
+}
+
+func stakeResult(user: String, amount: Int, lockedUntil: Int) = {
+  let sAmount = fraction(amount, Scale8, calculateSRate())
+  recalcResult(sAmount) ++ [
+    IntegerEntry(user+"_sPluto", tryGetInteger(user+"_sPluto") + sAmount)
+  ] ++ if (lockedUntil > 0) then {[StringEntry(user+"_lockHeights", lockedUntil.toString()+":"+sAmount.toString()+";"+tryGetString(user+"_vestingHeights"))]} else {[]}
+}
+
+func unstakeResult(user: String, sAmount: Int) = {
+  let currentSAmount = tryGetInteger(user+"_sPluto")
+  if (sAmount > currentSAmount) then {throw("this amount is not available to unclaim")} else {
+    recalcResult(-sAmount) ++ [
+      IntegerEntry(user+"_sPluto", currentSAmount - sAmount)
+    ]
+  }
+}
+
+@Callable(i)
+func getSRate(debug: Boolean) = {
+  let parameter = calculateSRate()
+  if (debug) then {throw(parameter.toString())} else {([], parameter)}
+}
+
+@Callable(i)
+func getStakedAmount(debug: Boolean, userAddress: String) = {
+  let parameter = calculateStakedAmount(userAddress)
+  if (debug) then {throw(parameter.toString())} else {([], parameter)}
+}
+
+@Callable(i)
+func getOnboardings(debug: Boolean, userAddress: String) = {
+  let li = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "21", "22", "23", "24", "25", "26", "27", "28", "29", "30", "31", "32", "33", "34", "35", "36", "37", "38", "39", "40", "41", "42", "43", "44", "45", "46", "47", "48", "49", "50", "51", "52", "53", "54", "55", "56", "57", "58", "59", "60", "61", "62", "63", "64", "65", "66", "67", "68", "69", "70", "71", "72", "73", "74", "75", "76", "77", "78", "79", "80", "81", "82", "83", "84", "85", "86", "87", "88", "89", "90", "91", "92", "93", "94", "95", "96", "97", "98", "99"]
+  let sPrefix = "onboarding_"+userAddress+"_"
+  func f(accum: String, next: String) = {
+    let key = sPrefix+next+"_data"
+    match getString(key) {
+      case s: String => accum+s+", "
+      case _ => accum
+    }
+  }
+  let parameter = FOLD<100>(li, "", f)
+  if (debug) then {throw(parameter)} else {([], parameter)}
+}
+
+@Callable(i)
+func stake() = {
+  let user = i.caller.toString()
+  let amount = i.payments[0].amount
+
+  if (amount <= 0 || i.payments[0].assetId != plutoId) then {throw("invalid token attached")}
+  else {
+    stakeResult(user, amount, 0)
+  }
+}
+
+@Callable(i)
+func unstake(amount: Int) = {
+  let user = i.caller.toString()
+  let sAmount = fraction(amount, Scale8, calculateSRate())
+  unstakeResult(user, sAmount)
+}
+
+@Callable(i)
+func startOnboarding(user: String, plutoAmount: Int, premiumAmount: Int, period: Int, premium: Int, assetId: String) = {
+  # issue contract only
+  let paymentAmount = i.payments[0].amount.value()
+  let address = user.addressFromStringValue()
+  let onboardingNum = tryGetInteger(user+"_onboardingAmount") + 1
+  let onboardingId = user+"_"+onboardingNum.toString()
+  let globalNum = tryGetInteger("global_onboardingAmount") + 1
+  let finishHeightStr = toString(height+period*dayDepth)
+  let toReceiveStr = toString(plutoAmount+premiumAmount)
+  
+  if (paymentAmount <= 0 || i.payments[0].assetId != plutoId) then {throw("invalid token attached")}
+  else if (paymentAmount < plutoAmount + premiumAmount) then {throw("not enough tokens attached")}
+  else {
+    [
+      StringEntry("onboarding_"+onboardingId+"_data", "{\"startHeight\": "+height.toString()+", \"finishHeight\": "+finishHeightStr+", \"startAmount\": "+plutoAmount.toString()+", \"finishAmount\": "+toReceiveStr+", \"premium\": "+premium.toString()+", \"assetId\": \""+assetId+"\", \"globalNum\": "+globalNum.toString()+"}"),
+      StringEntry("onboarding_"+globalNum.toString(), onboardingId+","+finishHeightStr+","+toReceiveStr),
+      StringEntry("onboarding_"+globalNum.toString()+"_status", "started"),
+
+      IntegerEntry(user+"_onboardingAmount", onboardingNum),
+      IntegerEntry("global_onboardingAmount", globalNum)
+    ]
+  }
+}
+
+@Verifier(tx)
+func verify() = sigVerify(tx.bodyBytes, tx.proofs[0], tx.senderPublicKey)
+        
