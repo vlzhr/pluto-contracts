@@ -1,0 +1,158 @@
+{-# STDLIB_VERSION 5 #-}
+{-# CONTENT_TYPE DAPP #-}
+{-# SCRIPT_TYPE ACCOUNT #-}
+
+
+let plutoId = base58'Ajso6nTTjptu2UHLx6hfSXVtHFtRBJCkKYd5SAyj7zf5'
+let plutoIdStr = "Ajso6nTTjptu2UHLx6hfSXVtHFtRBJCkKYd5SAyj7zf5"
+let parametersAddress = Address(base58'3P3a1jssxc2CGdyC7SGbTJc9ZvTjZ5jBMLZ')
+let stakingAddress = Address(base58'3P7dGTVZp8VLDYy3XEaUQbiqfi9cMK1Ly5q')
+let issuerAddress = Address(base58'3PCRXK4q3SWK3TfjTgYc88x3jr8semrHLJs')
+let treasuryAddress = Address(base58'3PKFFFsiKR7rgaeoLQZj6jLsxteZigccN8h')
+let teamAddress = Address(base58'3P8XyUj7seSjJc6gqDgM9MxAfmnmcDAE6gj')
+let poolAddress = Address(base58'3P93Kqz8PUbCudvMyjbci54WxQrtBtw4dbZ')
+
+let parentLpIdStr = "BNXTKjftTy5zZEozFdkqDTTiru7guvunLiCpZuTAaC4h"
+let parentLpId = base58'BNXTKjftTy5zZEozFdkqDTTiru7guvunLiCpZuTAaC4h'
+
+let Scale8 = 100000000
+
+
+func tryGetInteger(key: String) = {
+  match getInteger(this, key) {
+    case x: Int => x
+    case _ => 0
+  }}
+
+
+func tryGetIntParameter(key: String) = {
+  match getInteger(parametersAddress, key) {
+    case x: Int => x
+    case _ => 0
+  }}
+
+func tryGetStrParameter(key: String) = {
+  match getString(parametersAddress, key) {
+    case x: String => x
+    case _ => ""
+  }}
+
+
+func calculatePoolPrice(poolAddress: Address, assetStr: String) = {
+  # IMPORTANT: can me manipulated on market. so this is not a production implementation
+  let a0Weight = getIntegerValue(poolAddress, "static_" + assetStr + "_weight")
+  let a1Weight = getIntegerValue(poolAddress, "static_" + plutoIdStr + "_weight")
+  let a0Balance = getIntegerValue(poolAddress, "global_" + assetStr + "_balance")
+  let a1Balance = getIntegerValue(poolAddress, "global_" + plutoIdStr + "_balance")
+
+  fraction(Scale8, a1Balance*a0Weight, a0Balance*a1Weight)
+}
+
+func calculateIssuePluto(assetId: ByteVector, amount: Int, evaluation: Boolean) = {
+  strict onboardingParameters = match invoke(parametersAddress, "getOnboardingParameters", [false], []) {
+    case in: List[Any] => in
+    case _ => throw("cannot load parameters")
+  }
+
+  let buybackRatio = match onboardingParameters[4] {
+    case x: Int => x
+    case _ => throw("cannot parse parameters")
+  }
+  let premium = match onboardingParameters[1] {
+    case x: Int => x
+    case _ => throw("cannot parse parameters")
+  }
+  let teamPremium = match onboardingParameters[3] {
+    case x: Int => x
+    case _ => throw("cannot parse parameters")
+  }
+  let period = match onboardingParameters[2] {
+    case x: Int => x
+    case _ => throw("cannot parse parameters")
+  }
+
+  let assetIdStr = assetId.toBase58String()
+
+  let amountToBuyback = if (assetIdStr != parentLpIdStr) then {fraction(amount, buybackRatio, 10000)} else {0}
+  let amountToIssue = amount - amountToBuyback
+
+  strict inv = if (assetIdStr == parentLpIdStr) then {
+    unit
+  }
+  else if (evaluation) then {
+    invoke(poolAddress, "calcSwap", [assetIdStr, plutoIdStr, amountToBuyback], [])
+  } 
+  else {
+    invoke(poolAddress, "swap", [plutoIdStr, 0], [AttachedPayment(assetId, amountToBuyback)])
+  }
+  let plutoBought = match (inv) {
+      case x:Int => x
+      case _ => 0
+    }
+  
+  let assetPriceToPluto = if (assetIdStr != parentLpIdStr) then { 
+    calculatePoolPrice(poolAddress, assetIdStr) 
+  } else {
+    strict parentLpPrice = match invoke(parametersAddress, "getParentLpPrice", [false, true], []) {
+      case in: Int => in
+      case _ => throw("cannot load parent lp price")
+    } 
+    parentLpPrice
+  }
+  let plutoIssued = fraction(amountToIssue, assetPriceToPluto, Scale8)
+  let totalPluto = plutoBought + plutoIssued
+  let premiumPlutoIssued = fraction(totalPluto, premium, 10000)
+  let teamPlutoIssued = fraction(totalPluto, teamPremium, 10000)
+  
+  strict inv2 = invoke(issuerAddress, "requestIssue", [plutoIssued+premiumPlutoIssued+teamPlutoIssued], [])
+
+  [
+    plutoIssued,
+    plutoBought,
+    premiumPlutoIssued,
+    teamPlutoIssued,
+
+    amountToIssue,
+
+    premium,
+    period
+  ]
+}
+
+
+@Callable(i)
+func issuePluto(debug: Boolean) = {
+  let assetId = i.payments[0].assetId.value()
+  strict result = calculateIssuePluto(assetId, i.payments[0].amount.value(), false)
+
+  strict lockup = invoke(stakingAddress, "startOnboarding", 
+                  [i.caller.toString(), result[0]+result[1], result[2], result[6], result[5], i.payments[0].assetId.value().toBase58String()], 
+                  [AttachedPayment(plutoId, result[0]+result[1]+result[2])])
+
+  if (debug) then {
+    throw("issued: " + result[0].toString() + "; bought: " + result[1].toString() + "; premium: " + result[2].toString() + "; team: " + result[3].toString())
+  } else {
+    [
+      ScriptTransfer(treasuryAddress, result[4], assetId),
+      ScriptTransfer(teamAddress, result[3], plutoId)
+    ]
+  }
+}
+
+
+@Callable(i)
+func evaluateIssuePluto(debug: Boolean, assetIdStr: String, amount: Int) = {
+  let assetId = assetIdStr.fromBase58String()
+  strict result = calculateIssuePluto(assetId, amount, true)
+
+  if (debug) then {
+    throw("issued: " + result[0].toString() + "; bought: " + result[1].toString() + "; premium: " + result[2].toString() + "; team: " + result[3].toString())
+  } else {
+    ([], result[0] + result[1])
+  }
+}
+
+
+@Verifier(tx)
+func verify() = sigVerify(tx.bodyBytes, tx.proofs[0], tx.senderPublicKey)
+        
