@@ -122,7 +122,7 @@ func stake() = {
 func unstake(amount: Int) = {
   let user = i.caller.toString()
   let sAmount = fraction(amount, Scale8, calculateSRate())
-  unstakeResult(user, sAmount)
+  unstakeResult(user, sAmount) ++ [ScriptTransfer(i.caller, amount, plutoId)]
 }
 
 @Callable(i)
