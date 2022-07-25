@@ -80,6 +80,28 @@ func unstakeResult(user: String, sAmount: Int) = {
   }
 }
 
+func finishOnboardingResult(onboardingNum: String) = {
+  let data = tryGetString("onboarding_"+onboardingNum).split(",")
+  let user = data[0].split("_")[0]
+  let block = parseIntValue(data[1])
+  let plutoAmount = parseIntValue(data[2])
+
+  if (height >= block) then {
+    let statusKey = "onboarding_"+onboardingNum+"_status"
+    if (tryGetString(statusKey) == "started") then {
+      [
+        StringEntry(statusKey, "finished")
+      ] ++
+      stakeResult(user, plutoAmount, 0)
+    } else {
+      throw("onboarding was finished already")
+    }
+  } else {
+    throw("onboarding will be finished in: " + toString(block-height))
+  }
+}
+
+
 @Callable(i)
 func getSRate(debug: Boolean) = {
   let parameter = calculateSRate()
@@ -89,6 +111,13 @@ func getSRate(debug: Boolean) = {
 @Callable(i)
 func getStakedAmount(debug: Boolean, userAddress: String) = {
   let parameter = calculateStakedAmount(userAddress)
+  if (debug) then {throw(parameter.toString())} else {([], parameter)}
+}
+
+@Callable(i)
+func getTotalStakedAmount(debug: Boolean) = {  
+  let amount = tryGetInteger("global_sPluto")
+  let parameter = fraction(amount, calculateSRate(), Scale8)
   if (debug) then {throw(parameter.toString())} else {([], parameter)}
 }
 
@@ -149,6 +178,13 @@ func startOnboarding(user: String, plutoAmount: Int, premiumAmount: Int, period:
     ]
   }
 }
+
+@Callable(i)
+func finishOnboardings(numListStr: String) = {
+  func f(accum: List[ScriptTransfer|IntegerEntry|StringEntry], next: String) = {accum ++ finishOnboardingResult(next)}
+  FOLD<10>(numListStr.split(","), [], f)
+}
+
 
 @Verifier(tx)
 func verify() = sigVerify(tx.bodyBytes, tx.proofs[0], tx.senderPublicKey)
