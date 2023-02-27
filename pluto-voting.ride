@@ -1,0 +1,105 @@
+{-# STDLIB_VERSION 6 #-}
+{-# SCRIPT_TYPE ACCOUNT #-}
+{-# CONTENT_TYPE DAPP #-}
+
+let stakingAddress = Address(base58'3P7dGTVZp8VLDYy3XEaUQbiqfi9cMK1Ly5q')
+
+let Scale8 = 100000000
+
+func tryGetInteger(key: String) = match getInteger(this, key) {
+    case b: Int => 
+        b
+    case _ => 
+        0
+}
+
+func tryGetBoolean(key: String) = match getBoolean(this, key) {
+    case b: Boolean => 
+        b
+    case _ => 
+        false
+}
+
+func tryGetString(key: String) = match getString(this, key) {
+    case b: String => 
+        b
+    case _ => 
+        ""
+}
+
+
+let batches = ["1", "2", "3", "4"]
+let availableOptions = ["1", "2", "3"]
+
+
+@Callable(i)
+func vote(option: String, votingId: String) = {
+  let voteId = votingId
+  let addressStr = toString(i.caller)
+  let randomHash = sha256(i.transactionId)
+  let batch = toString((1 + (toInt(randomHash) % size(batches))))
+  let voteValueStr = option
+  if (availableOptions.indexOf(option) == unit) then {throw("incorrect option is chosen")}
+  else if (!tryGetBoolean(voteId+"_status")) then {throw("voting is not active")}
+  else if (tryGetString(voteId + "_" + addressStr) != "")
+    then throw("you already voted")
+    else [
+      StringEntry(voteId + "_" + voteValueStr + "_batch" + batch, tryGetString(voteId + "_" + voteValueStr + "_batch" + batch) + addressStr + ","), 
+      StringEntry(voteId + "_" + addressStr, voteValueStr)
+    ]
+}
+
+
+@Callable(i)
+func results(votingId: String) = {
+  func batchHandler(accum: (Int, Int, Int), batch: String) =     {
+    strict inv = invoke(this, "batchResults", [batch, votingId], nil)
+    let new = match inv {
+        case x: (Int, Int, Int) => x
+        case _ => throw("error in batch "+batch)
+    }
+    (accum._1 + new._1, accum._2 + new._2, accum._3 + new._3)
+  }
+
+  let res = FOLD<4>(batches, (0, 0, 0), batchHandler)
+  throw("votes result " + toString(res._1) + ", " + toString(res._2) + ", " + toString(res._3))
+}
+
+
+@Callable(i)
+func batchResults(batch: String, votingId: String) = {
+  func votesHandler(accum: Int, addressStr: String) = (
+    accum + (match getInteger(stakingAddress, (addressStr + "_sPluto")) {
+    case x: Int => 
+        x
+    case _ => 
+        0
+  }))
+
+  let li1 = split(tryGetString(votingId + "_1_batch" + batch), ",")
+  let votes1 = FOLD<90>(li1, 0, votesHandler)
+
+  let li2 = split(tryGetString(votingId + "_2_batch" + batch), ",")
+  let votes2 = FOLD<90>(li2, 0, votesHandler)
+
+  let li3 = split(tryGetString(votingId + "_3_batch" + batch), ",")
+  let votes3 = FOLD<90>(li3, 0, votesHandler)
+
+  ([], (votes1 / Scale8, votes2 / Scale8, votes3 / Scale8))
+}
+
+
+@Callable(i)
+func setVotingStatus(votingId: String, active: Boolean) = {
+  if (this != i.caller) then {throw("admin only")}
+  else {
+    [
+      BooleanEntry(votingId+"_status", active)
+    ]
+  }
+}
+
+
+@Verifier(tx)
+func verify () = sigVerify(tx.bodyBytes, tx.proofs[0], tx.senderPublicKey)
+
